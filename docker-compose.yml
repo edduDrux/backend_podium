@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: podium
+      POSTGRES_PASSWORD: podium
+      POSTGRES_DB: podium
+    ports:
+      - "5433:5432"
+    volumes:
+      - podium_pg:/var/lib/postgresql
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+volumes:
+  podium_pg:

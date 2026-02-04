@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "podium-backend"
+version = "0.1.0"
+description = "Backend do projeto Podium"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic-settings",
+  "SQLAlchemy>=2.0",
+  "asyncpg",
+  "python-multipart",
+  "alembic",
+  "celery",
+  "redis",
+  "pypdf",
+  "httpx",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
