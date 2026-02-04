@@ -106,13 +106,13 @@ async def search_chunks(
     tsq = func.plainto_tsquery("portuguese", q)
     rank = func.ts_rank_cd(tsv, tsq)
 
-stmt = (
-    select(DocumentChunk, rank.label("rank"))
-    .where(DocumentChunk.document_id == document_id)
-    .where(tsv.op("@@")(tsq))
-    .order_by(desc("rank"))
-    .limit(limit)
-)
+    stmt = (
+        select(DocumentChunk, rank.label("rank"))
+        .where(DocumentChunk.document_id == document_id)
+        .where(tsv.op("@@")(tsq))
+        .order_by(desc(rank))
+        .limit(limit)
+    )
 
     res = await db.execute(stmt)
     rows = res.all()
