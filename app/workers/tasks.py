@@ -9,6 +9,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.question import Question
 from app.models.session import Session
 from app.models.transcript import TranscriptSegment
+from app.services.redis_service import publish_session_event
 from app.services.simulation_service import generate_question_stub
 from app.services.document_service import extract_text_from_pdf, chunk_text
 
@@ -96,6 +97,24 @@ async def _generate_question_for_segment_async(session_id: int, segment_id: int)
         )
         db.add(question)
         await db.commit()
+        await db.refresh(question)
+
+        await publish_session_event(
+            session_id,
+            {
+                "type": "question.created",
+                "session_id": session_id,
+                "question": {
+                    "id": question.id,
+                    "session_id": question.session_id,
+                    "question_text": question.question_text,
+                    "intent": question.intent,
+                    "difficulty": question.difficulty,
+                    "evidence_chunk_ids": question.evidence_chunk_ids,
+                    "created_at": question.created_at.isoformat() if question.created_at else None,
+                },
+            },
+        )
 
         return {
             "ok": True,
