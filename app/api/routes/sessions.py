@@ -3,9 +3,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.models.question import Question
 from app.models.session import Session
 from app.models.transcript import TranscriptSegment
+from app.schemas.question import QuestionOut
 from app.schemas.transcript import SegmentIn, SegmentOut
+from app.workers.tasks import generate_question_for_segment
 
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -34,6 +37,9 @@ async def create_segment(
 
     await db.commit()
     await db.refresh(segment)
+
+    generate_question_for_segment.delay(session_id, segment.id)
+
     return segment
 
 
@@ -51,6 +57,26 @@ async def list_segments(
         select(TranscriptSegment)
         .where(TranscriptSegment.session_id == session_id)
         .order_by(TranscriptSegment.id.desc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+@router.get("/{session_id}/questions", response_model=list[QuestionOut])
+async def list_questions(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=200),
+):
+    session = await db.get(Session, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Sessão não encontrada.")
+
+    stmt = (
+        select(Question)
+        .where(Question.session_id == session_id)
+        .order_by(Question.id.desc())
         .limit(limit)
     )
     result = await db.execute(stmt)

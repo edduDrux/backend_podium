@@ -6,6 +6,10 @@ from app.workers.celery_app import celery
 from app.core.database import AsyncSessionLocal
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.models.question import Question
+from app.models.session import Session
+from app.models.transcript import TranscriptSegment
+from app.services.simulation_service import generate_question_stub
 from app.services.document_service import extract_text_from_pdf, chunk_text
 
 logger = get_task_logger(__name__)
@@ -60,3 +64,43 @@ async def _extract_document_text_async(document_id: int) -> dict:
             await db.commit()
             logger.exception("Falha ao processar documento %s: %s", doc.id, e)
             return {"ok": False, "document_id": doc.id, "error": str(e)}
+
+
+@celery.task(name="generate_question_for_segment")
+def generate_question_for_segment(session_id: int, segment_id: int) -> dict:
+    return asyncio.run(_generate_question_for_segment_async(session_id, segment_id))
+
+
+async def _generate_question_for_segment_async(session_id: int, segment_id: int) -> dict:
+    async with AsyncSessionLocal() as db:
+        segment = await db.get(TranscriptSegment, segment_id)
+        if not segment or segment.session_id != session_id:
+            return {"ok": False, "error": "Segmento não encontrado para a sessão"}
+
+        session = await db.get(Session, session_id)
+        if not session:
+            return {"ok": False, "error": "Sessão não encontrada"}
+
+        doc = None
+        if session.document_id is not None:
+            doc = await db.get(Document, session.document_id)
+
+        payload = await generate_question_stub(db, session_id=session_id, segment_text=segment.text)
+
+        question = Question(
+            session_id=session_id,
+            question_text=payload["question_text"],
+            intent=payload["intent"],
+            difficulty=payload["difficulty"],
+            evidence_chunk_ids=payload["evidence_chunk_ids"],
+        )
+        db.add(question)
+        await db.commit()
+
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "segment_id": segment_id,
+            "question_id": question.id,
+            "has_document": doc is not None,
+        }
