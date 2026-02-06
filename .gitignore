@@ -1,6 +1,30 @@
-/venv
-.env
+# Python
+__pycache__/
 *.pyc
-*.txt
-*.pdf
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
 PKG-INFO
+
+# Env
+.env
+
+# Local data (uploads, generated files)
+data/
+uploads/
+*.wav
+*.mp3
+*.m4a
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
