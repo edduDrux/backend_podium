@@ -14,9 +14,173 @@ from app.models.session import Session
 from app.models.transcript import TranscriptSegment
 from app.services.redis_service import publish_session_event
 from app.services.simulation_service import generate_question_stub
-from app.services.document_service import extract_text_from_pdf, chunk_text
+from app.services.document_service import extract_text, chunk_text
 
 logger = get_task_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# STT task
+# ---------------------------------------------------------------------------
+
+@celery.task(name="process_audio_transcription")
+def process_audio_transcription(session_id: int, file_path: str, filename: str) -> dict:
+    return asyncio.run(_process_audio_transcription_async(session_id, file_path, filename))
+
+
+async def _process_audio_transcription_async(
+    session_id: int, file_path: str, filename: str
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        session = await db.get(Session, session_id)
+        if not session:
+            return {"ok": False, "error": "Sessão não encontrada"}
+
+        try:
+            from app.services.stt_service import transcribe_audio
+
+            segments = await transcribe_audio(file_path, filename)
+            if not segments:
+                return {"ok": True, "session_id": session_id, "segments_created": 0}
+
+            created = 0
+            for seg in segments:
+                transcript_seg = TranscriptSegment(
+                    session_id=session_id,
+                    text=seg.text,
+                    start_ms=seg.start_ms,
+                    end_ms=seg.end_ms,
+                )
+                db.add(transcript_seg)
+                if session.status == "READY":
+                    session.status = "RUNNING"
+
+                await db.flush()
+                generate_question_for_segment.delay(session_id, transcript_seg.id)
+                created += 1
+
+            await db.commit()
+            logger.info(
+                "STT: sessão %s — %s segmentos criados de '%s'",
+                session_id, created, filename,
+            )
+            return {"ok": True, "session_id": session_id, "segments_created": created}
+
+        except Exception as exc:
+            logger.exception("Falha no STT para sessão %s: %s", session_id, exc)
+            return {"ok": False, "session_id": session_id, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Feedback task
+# ---------------------------------------------------------------------------
+
+@celery.task(name="generate_session_feedback")
+def generate_session_feedback(session_id: int) -> dict:
+    return asyncio.run(_generate_session_feedback_async(session_id))
+
+
+async def _generate_session_feedback_async(session_id: int) -> dict:
+    async with AsyncSessionLocal() as db:
+        session = await db.get(Session, session_id)
+        if not session:
+            return {"ok": False, "error": "Sessão não encontrada"}
+
+        # Coleta segmentos
+        seg_stmt = (
+            select(TranscriptSegment)
+            .where(TranscriptSegment.session_id == session_id)
+            .order_by(TranscriptSegment.id.asc())
+        )
+        segments = list((await db.execute(seg_stmt)).scalars().all())
+
+        # Coleta perguntas geradas
+        q_stmt = (
+            select(Question)
+            .where(Question.session_id == session_id)
+            .order_by(Question.id.asc())
+        )
+        questions = list((await db.execute(q_stmt)).scalars().all())
+
+        if not segments:
+            session.feedback_text = "Nenhum segmento de fala registrado para gerar feedback."
+            await db.commit()
+            return {"ok": True, "session_id": session_id, "generated": False}
+
+        # Monta resumo da apresentação
+        transcript_summary = " ".join(s.text for s in segments)[:2000]
+        questions_summary = "\n".join(
+            f"- [{q.intent}] {q.question_text}" for q in questions[:20]
+        )
+
+        prompt = (
+            "Você é um coach de oratória especializado. "
+            "Analise a apresentação abaixo e forneça um feedback construtivo em português.\n\n"
+            "## Transcrição da apresentação (resumo)\n\n"
+            f"{transcript_summary}\n\n"
+            "## Perguntas geradas durante a sessão\n\n"
+            f"{questions_summary or '(nenhuma pergunta gerada)'}\n\n"
+            "## Sua tarefa\n\n"
+            "Escreva um feedback em 3 partes:\n"
+            "1. **Pontos fortes** — o que foi bem comunicado\n"
+            "2. **Pontos de melhoria** — o que pode ser aprimorado\n"
+            "3. **Recomendação principal** — uma ação concreta para a próxima apresentação\n\n"
+            "Seja específico, direto e encorajador. Máximo de 300 palavras."
+        )
+
+        feedback_text = None
+        try:
+            from app.services.llm_service import generate_question as call_llm
+            # Reutiliza o client LLM; parse simples pois resposta é texto livre
+            from app.core.config import settings
+            import httpx
+
+            if settings.openai_api_key:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                        json={
+                            "model": "gpt-4o-mini",
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.6,
+                            "max_tokens": 600,
+                        },
+                    )
+                    resp.raise_for_status()
+                    feedback_text = resp.json()["choices"][0]["message"]["content"].strip()
+            elif settings.google_api_key:
+                url = (
+                    "https://generativelanguage.googleapis.com/v1beta"
+                    f"/models/gemini-1.5-flash:generateContent?key={settings.google_api_key}"
+                )
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        url,
+                        json={
+                            "contents": [{"parts": [{"text": prompt}]}],
+                            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 600},
+                        },
+                    )
+                    resp.raise_for_status()
+                    feedback_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as exc:
+            logger.warning("Falha ao gerar feedback via LLM: %s", exc)
+
+        if not feedback_text:
+            # Stub de feedback quando LLM não está disponível
+            feedback_text = (
+                f"Sessão concluída com {len(segments)} segmento(s) de fala "
+                f"e {len(questions)} pergunta(s) gerada(s). "
+                "Configure OPENAI_API_KEY ou GOOGLE_API_KEY para feedback detalhado."
+            )
+
+        session.feedback_text = feedback_text
+        session.status = "FINISHED"
+        await db.commit()
+
+        logger.info("Feedback gerado para sessão %s", session_id)
+        return {"ok": True, "session_id": session_id, "generated": True}
 
 
 def _normalize_text(value: str) -> str:
@@ -44,7 +208,7 @@ async def _extract_document_text_async(document_id: int) -> dict:
             doc.status = "PROCESSING"
             await db.commit()
 
-            text = extract_text_from_pdf(doc.storage_path)
+            text = extract_text(doc.storage_path, doc.content_type)
             doc.extracted_text = text
 
             chunks = chunk_text(text, max_chars=1200, overlap=200)
@@ -54,9 +218,21 @@ async def _extract_document_text_async(document_id: int) -> dict:
                 delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
             )
 
-            # salva chunks novos
-            for i, c in enumerate(chunks):
-                db.add(DocumentChunk(document_id=doc.id, chunk_index=i, content=c))
+            # gera embeddings (opcional — requer OPENAI_API_KEY)
+            from app.services.vector_service import get_embedding
+            embeddings: list[list[float] | None] = []
+            for c in chunks:
+                emb = await get_embedding(c)
+                embeddings.append(emb)
+
+            # salva chunks novos com embeddings
+            for i, (c, emb) in enumerate(zip(chunks, embeddings)):
+                db.add(DocumentChunk(
+                    document_id=doc.id,
+                    chunk_index=i,
+                    content=c,
+                    embedding=emb,
+                ))
 
             doc.status = "CHUNKED"
             await db.commit()

@@ -10,9 +10,10 @@ class SessionCreate(BaseModel):
 
 class SessionOut(BaseModel):
     id: int
-    document_id: int
-    profile_id: int
+    document_id: int | None
+    profile_id: int | None
     status: str
+    feedback_text: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
