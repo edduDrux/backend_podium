@@ -19,6 +19,16 @@ dependencies = [
   "redis",
   "pypdf",
   "httpx",
+  # Documentos
+  "python-pptx",
+  "python-docx",
+  # Autenticação
+  "bcrypt",
+  "python-jose[cryptography]",
+  # Testes
+  "pytest",
+  "pytest-asyncio",
+  "anyio",
 ]
 
 [tool.setuptools.packages.find]

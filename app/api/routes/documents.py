@@ -23,9 +23,18 @@ async def upload_document(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
-    # MVP: só PDF por enquanto
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="No MVP, envie apenas PDF (application/pdf).")
+    ACCEPTED_TYPES = {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    }
+    if file.content_type not in ACCEPTED_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="Tipo de arquivo não suportado. Envie PDF, PPTX ou DOCX.",
+        )
 
     storage_path = await save_upload(file)
 

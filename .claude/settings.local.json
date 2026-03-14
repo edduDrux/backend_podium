@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/Users/eduar/podium/backend_podium/app/prompts/profiles/corporate.md:*)",
+      "Bash(/c/Users/eduar/podium/backend_podium/app/prompts/profiles/interview.md:*)",
+      "Bash(/c/Users/eduar/podium/backend_podium/app/prompts/profiles/auditorium.md:*)",
+      "Bash(source:*)",
+      "Bash(/c/Users/eduar/podium/backend_podium/pytest.ini:*)",
+      "Bash(python:*)",
+      "Bash(.venv/Scripts/python.exe:*)"
+    ]
+  }
+}

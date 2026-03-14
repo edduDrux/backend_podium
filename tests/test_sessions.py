@@ -1,0 +1,109 @@
+"""
+Testes de sessões. A task Celery é mockada para evitar dependência de worker.
+"""
+import pytest
+from unittest.mock import patch
+
+from app.models.document import Document
+from app.models.profile import SimulationProfile
+from tests.conftest import _TestSessionLocal
+
+
+async def _setup_doc_and_profile(status: str = "CHUNKED"):
+    async with _TestSessionLocal() as db:
+        doc = Document(
+            filename="test.pdf",
+            content_type="application/pdf",
+            storage_path="/tmp/test.pdf",
+            status=status,
+        )
+        profile = SimulationProfile(
+            key="test_p",
+            name="Test",
+            description="",
+            config={"max_questions_per_minute": 5},
+        )
+        db.add(doc)
+        db.add(profile)
+        await db.commit()
+        await db.refresh(doc)
+        await db.refresh(profile)
+        return doc.id, profile.id
+
+
+@pytest.mark.asyncio
+async def test_create_session(client):
+    doc_id, profile_id = await _setup_doc_and_profile()
+    resp = await client.post("/sessions", json={"document_id": doc_id, "profile_id": profile_id})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "READY"
+    assert data["document_id"] == doc_id
+
+
+@pytest.mark.asyncio
+async def test_create_session_document_not_ready(client):
+    doc_id, profile_id = await _setup_doc_and_profile(status="QUEUED")
+    resp = await client.post("/sessions", json={"document_id": doc_id, "profile_id": profile_id})
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_create_session_document_not_found(client):
+    async with _TestSessionLocal() as db:
+        profile = SimulationProfile(
+            key="prf_nf", name="T", description="", config={}
+        )
+        db.add(profile)
+        await db.commit()
+        await db.refresh(profile)
+        profile_id = profile.id
+
+    resp = await client.post("/sessions", json={"document_id": 9999, "profile_id": profile_id})
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_session_not_found(client):
+    resp = await client.get("/sessions/9999")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_create_segment_triggers_task(client):
+    doc_id, profile_id = await _setup_doc_and_profile()
+    resp = await client.post("/sessions", json={"document_id": doc_id, "profile_id": profile_id})
+    session_id = resp.json()["id"]
+
+    with patch("app.api.routes.sessions.generate_question_for_segment") as mock_task:
+        mock_task.delay.return_value = None
+        resp = await client.post(f"/sessions/{session_id}/segments", json={
+            "text": "Redes neurais convolucionais são usadas em visão computacional.",
+            "start_ms": 0,
+            "end_ms": 4000,
+        })
+        assert resp.status_code == 200
+        assert mock_task.delay.called
+
+    # Verifica que a sessão mudou para RUNNING
+    resp = await client.get(f"/sessions/{session_id}")
+    assert resp.json()["status"] == "RUNNING"
+
+    # Lista segmentos
+    resp = await client.get(f"/sessions/{session_id}/segments")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_analytics_empty_session(client):
+    doc_id, profile_id = await _setup_doc_and_profile()
+    resp = await client.post("/sessions", json={"document_id": doc_id, "profile_id": profile_id})
+    session_id = resp.json()["id"]
+
+    resp = await client.get(f"/sessions/{session_id}/analytics")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_segments"] == 0
+    assert data["total_questions"] == 0
+    assert data["questions_per_minute"] is None
