@@ -8,6 +8,7 @@ from app.schemas.chunk import DocumentChunkOut, ChunkSearchHit
 
 from app.workers.tasks import extract_document_text
 from app.core.database import get_db
+from app.core.enums import DocumentStatus
 from app.models.document import Document
 from app.schemas.document import DocumentOut
 from app.services.storage_service import save_upload
@@ -42,7 +43,7 @@ async def upload_document(
         filename=file.filename,
         content_type=file.content_type,
         storage_path=storage_path,
-        status="QUEUED",
+        status=DocumentStatus.QUEUED,
     )
     db.add(doc)
     await db.commit()

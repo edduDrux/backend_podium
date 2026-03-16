@@ -118,9 +118,8 @@ async def generate_question_stub(
         result = await generate_question(full_prompt)
         return {**result, "evidence_chunk_ids": evidence_chunk_ids}
 
-    except RuntimeError:
-        # Nenhuma API key configurada — usa stub silenciosamente
-        pass
+    except RuntimeError as exc:
+        logger.debug("LLM não configurado, usando stub. Motivo: %s", exc)
     except Exception as exc:
         # Falha na chamada LLM — loga e usa stub
         logger.warning("Falha ao chamar LLM, usando stub. Erro: %s", exc)

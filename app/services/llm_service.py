@@ -5,11 +5,15 @@ Prioridade: OpenAI se OPENAI_API_KEY estiver configurada, senão Gemini.
 Se nenhuma chave estiver disponível, lança RuntimeError para que o caller
 possa usar o stub de fallback.
 """
+import asyncio
 import json
+import logging
 
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 async def generate_question(prompt: str) -> dict:
@@ -36,19 +40,27 @@ async def generate_question(prompt: str) -> dict:
 # ---------------------------------------------------------------------------
 
 async def _call_openai(prompt: str, api_key: str) -> str:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 400,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+    for attempt in range(1, 3):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 400,
+                },
+            )
+            if resp.status_code in (429, 503) and attempt < 2:
+                logger.warning(f"OpenAI retry {attempt}/2 após status {resp.status_code}")
+                await asyncio.sleep(2)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("choices") or len(data["choices"]) == 0:
+                raise ValueError("Resposta OpenAI sem choices")
+            return data["choices"][0]["message"]["content"]
 
 
 async def _call_gemini(prompt: str, api_key: str) -> str:
@@ -56,16 +68,21 @@ async def _call_gemini(prompt: str, api_key: str) -> str:
         "https://generativelanguage.googleapis.com/v1beta"
         f"/models/gemini-1.5-flash:generateContent?key={api_key}"
     )
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            url,
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 400},
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    for attempt in range(1, 3):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                url,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 400},
+                },
+            )
+            if resp.status_code in (429, 503) and attempt < 2:
+                logger.warning(f"Gemini retry {attempt}/2 após status {resp.status_code}")
+                await asyncio.sleep(2)
+                continue
+            resp.raise_for_status()
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +101,7 @@ def _parse_response(raw: str) -> dict:
     if text.startswith("```"):
         lines = text.splitlines()
         # remove primeira e última linha (fences)
-        inner = lines[1:-1] if lines[-1].strip().startswith("```") else lines[1:]
+        inner = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
         text = "\n".join(inner).strip()
 
     try:
@@ -97,7 +114,7 @@ def _parse_response(raw: str) -> dict:
     except (json.JSONDecodeError, ValueError, TypeError):
         # LLM retornou texto livre em vez de JSON — usa como question_text
         return {
-            "question_text": text[:500] if text else "Pergunta não disponível.",
+            "question_text": text[:1000] if text else "Pergunta não disponível.",
             "intent": "general",
             "difficulty": 3,
         }

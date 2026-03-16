@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.core.enums import SessionStatus
+
 
 class SessionCreate(BaseModel):
     document_id: int
@@ -10,9 +12,10 @@ class SessionCreate(BaseModel):
 
 class SessionOut(BaseModel):
     id: int
+    user_id: int | None = None
     document_id: int | None
     profile_id: int | None
-    status: str
+    status: SessionStatus
     feedback_text: str | None = None
     created_at: datetime
 

@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 from datetime import datetime, timedelta, timezone
 
 from celery.utils.log import get_task_logger
@@ -6,6 +7,7 @@ from sqlalchemy import delete, func, select
 
 from app.workers.celery_app import celery
 from app.core.database import AsyncSessionLocal
+from app.core.enums import DocumentStatus, SessionStatus
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.profile import SimulationProfile
@@ -25,6 +27,7 @@ logger = get_task_logger(__name__)
 
 @celery.task(name="process_audio_transcription")
 def process_audio_transcription(session_id: int, file_path: str, filename: str) -> dict:
+    # pool=solo no Windows suporta asyncio.run()
     return asyncio.run(_process_audio_transcription_async(session_id, file_path, filename))
 
 
@@ -52,8 +55,8 @@ async def _process_audio_transcription_async(
                     end_ms=seg.end_ms,
                 )
                 db.add(transcript_seg)
-                if session.status == "READY":
-                    session.status = "RUNNING"
+                if session.status == SessionStatus.READY:
+                    session.status = SessionStatus.RUNNING
 
                 await db.flush()
                 generate_question_for_segment.delay(session_id, transcript_seg.id)
@@ -77,6 +80,7 @@ async def _process_audio_transcription_async(
 
 @celery.task(name="generate_session_feedback")
 def generate_session_feedback(session_id: int) -> dict:
+    # pool=solo no Windows suporta asyncio.run()
     return asyncio.run(_generate_session_feedback_async(session_id))
 
 
@@ -107,8 +111,8 @@ async def _generate_session_feedback_async(session_id: int) -> dict:
             await db.commit()
             return {"ok": True, "session_id": session_id, "generated": False}
 
-        # Monta resumo da apresentação
-        transcript_summary = " ".join(s.text for s in segments)[:2000]
+        # Monta resumo da apresentação (separador claro entre segmentos)
+        transcript_summary = " | ".join(s.text for s in segments)[:3000]
         questions_summary = "\n".join(
             f"- [{q.intent}] {q.question_text}" for q in questions[:20]
         )
@@ -130,40 +134,16 @@ async def _generate_session_feedback_async(session_id: int) -> dict:
 
         feedback_text = None
         try:
-            from app.services.llm_service import generate_question as call_llm
-            # Reutiliza o client LLM; parse simples pois resposta é texto livre
+            from app.services.llm_service import _call_openai, _call_gemini
             from app.core.config import settings
-            import httpx
 
             if settings.openai_api_key:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    resp = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                        json={
-                            "model": "gpt-4o-mini",
-                            "messages": [{"role": "user", "content": prompt}],
-                            "temperature": 0.6,
-                            "max_tokens": 600,
-                        },
-                    )
-                    resp.raise_for_status()
-                    feedback_text = resp.json()["choices"][0]["message"]["content"].strip()
+                feedback_text = await _call_openai(prompt, settings.openai_api_key)
             elif settings.google_api_key:
-                url = (
-                    "https://generativelanguage.googleapis.com/v1beta"
-                    f"/models/gemini-1.5-flash:generateContent?key={settings.google_api_key}"
-                )
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    resp = await client.post(
-                        url,
-                        json={
-                            "contents": [{"parts": [{"text": prompt}]}],
-                            "generationConfig": {"temperature": 0.6, "maxOutputTokens": 600},
-                        },
-                    )
-                    resp.raise_for_status()
-                    feedback_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                feedback_text = await _call_gemini(prompt, settings.google_api_key)
+
+            if feedback_text:
+                feedback_text = feedback_text.strip()
         except Exception as exc:
             logger.warning("Falha ao gerar feedback via LLM: %s", exc)
 
@@ -176,25 +156,38 @@ async def _generate_session_feedback_async(session_id: int) -> dict:
             )
 
         session.feedback_text = feedback_text
-        session.status = "FINISHED"
+        session.status = SessionStatus.FINISHED
         await db.commit()
 
         logger.info("Feedback gerado para sessão %s", session_id)
         return {"ok": True, "session_id": session_id, "generated": True}
 
 
+# ---------------------------------------------------------------------------
+# Helpers de deduplicação
+# ---------------------------------------------------------------------------
+
 def _normalize_text(value: str) -> str:
     return " ".join(value.lower().split())
 
 
 def _is_similar_question_text(a: str, b: str) -> bool:
+    """Retorna True se as perguntas tiverem > 75% de similaridade."""
     a_norm = _normalize_text(a)
     b_norm = _normalize_text(b)
-    return a_norm == b_norm or a_norm in b_norm or b_norm in a_norm
+    if a_norm == b_norm:
+        return True
+    ratio = difflib.SequenceMatcher(None, a_norm, b_norm).ratio()
+    return ratio > 0.75
 
+
+# ---------------------------------------------------------------------------
+# Document processing task
+# ---------------------------------------------------------------------------
 
 @celery.task(name="extract_document_text")
 def extract_document_text(document_id: int) -> dict:
+    # pool=solo no Windows suporta asyncio.run()
     return asyncio.run(_extract_document_text_async(document_id))
 
 
@@ -205,7 +198,7 @@ async def _extract_document_text_async(document_id: int) -> dict:
             return {"ok": False, "error": "Documento não encontrado"}
 
         try:
-            doc.status = "PROCESSING"
+            doc.status = DocumentStatus.PROCESSING
             await db.commit()
 
             text = extract_text(doc.storage_path, doc.content_type)
@@ -234,7 +227,7 @@ async def _extract_document_text_async(document_id: int) -> dict:
                     embedding=emb,
                 ))
 
-            doc.status = "CHUNKED"
+            doc.status = DocumentStatus.CHUNKED
             await db.commit()
 
             logger.info(
@@ -250,14 +243,19 @@ async def _extract_document_text_async(document_id: int) -> dict:
             }
 
         except Exception as e:
-            doc.status = "FAILED"
+            doc.status = DocumentStatus.FAILED
             await db.commit()
             logger.exception("Falha ao processar documento %s: %s", doc.id, e)
             return {"ok": False, "document_id": doc.id, "error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Question generation task
+# ---------------------------------------------------------------------------
+
 @celery.task(name="generate_question_for_segment")
 def generate_question_for_segment(session_id: int, segment_id: int) -> dict:
+    # pool=solo no Windows suporta asyncio.run()
     return asyncio.run(_generate_question_for_segment_async(session_id, segment_id))
 
 
@@ -307,11 +305,14 @@ async def _generate_question_for_segment_async(session_id: int, segment_id: int)
         )
         last_question = (await db.execute(last_question_stmt)).scalars().first()
 
+        # Cooldown configurável via perfil, fallback 15s
+        cooldown_seconds = int(profile_config.get("cooldown_seconds", 15))
+
         if last_question and last_question.created_at is not None:
             created_at = last_question.created_at
             if created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=timezone.utc)
-            if (now_utc - created_at).total_seconds() < 15:
+            if (now_utc - created_at).total_seconds() < cooldown_seconds:
                 return {
                     "ok": True,
                     "session_id": session_id,
