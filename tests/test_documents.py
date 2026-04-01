@@ -1,32 +1,45 @@
 """
 Testes do endpoint de documentos.
 Upload de arquivo, extensão inválida e tamanho excedido.
+POST /documents agora requer autenticação JWT.
 """
 import io
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 
 @pytest.mark.asyncio
-async def test_upload_invalid_extension(client):
+async def test_upload_requires_auth(client):
+    """POST /documents sem token deve retornar 401."""
+    file_data = b"%PDF-1.4 minimal"
+    resp = await client.post(
+        "/documents",
+        files={"file": ("doc.pdf", io.BytesIO(file_data), "application/pdf")},
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_upload_invalid_extension(client, auth_headers):
     """Arquivo .txt deve ser rejeitado (422 pelo content-type ou 415 pela extensão)."""
     file_data = b"conteudo qualquer"
     resp = await client.post(
         "/documents",
         files={"file": ("relatorio.txt", io.BytesIO(file_data), "text/plain")},
+        headers=auth_headers,
     )
     assert resp.status_code in (415, 422)
 
 
 @pytest.mark.asyncio
-async def test_upload_invalid_content_type(client):
+async def test_upload_invalid_content_type(client, auth_headers):
     """Content-type não aceito deve retornar 422."""
     file_data = b"%PDF-fake"
     resp = await client.post(
         "/documents",
         files={"file": ("script.exe", io.BytesIO(file_data), "application/x-msdownload")},
+        headers=auth_headers,
     )
-    # pode ser 422 (content-type) ou 415 (extensão) dependendo da ordem
     assert resp.status_code in (415, 422)
 
 
@@ -38,24 +51,26 @@ async def test_get_document_not_found(client):
 
 
 @pytest.mark.asyncio
-async def test_upload_pdf_creates_document(client):
-    """Upload de PDF válido deve criar documento com status QUEUED."""
+async def test_upload_pdf_creates_document(client, auth_headers):
+    """Upload de PDF válido deve criar documento com status QUEUED e user_id."""
     file_data = b"%PDF-1.4 minimal pdf content"
     with patch("app.api.routes.documents.extract_document_text") as mock_task:
         mock_task.delay.return_value = None
         resp = await client.post(
             "/documents",
             files={"file": ("apresentacao.pdf", io.BytesIO(file_data), "application/pdf")},
+            headers=auth_headers,
         )
     assert resp.status_code == 200
     data = resp.json()
     assert data["filename"] == "apresentacao.pdf"
     assert data["status"] == "QUEUED"
+    assert data["user_id"] is not None
     assert "id" in data
 
 
 @pytest.mark.asyncio
-async def test_get_chunks_document_not_ready(client):
+async def test_get_chunks_document_not_ready(client, auth_headers):
     """GET /chunks em documento QUEUED deve retornar 409."""
     file_data = b"%PDF-minimal"
     with patch("app.api.routes.documents.extract_document_text") as mock_task:
@@ -63,6 +78,7 @@ async def test_get_chunks_document_not_ready(client):
         resp = await client.post(
             "/documents",
             files={"file": ("doc.pdf", io.BytesIO(file_data), "application/pdf")},
+            headers=auth_headers,
         )
     doc_id = resp.json()["id"]
 
@@ -71,7 +87,7 @@ async def test_get_chunks_document_not_ready(client):
 
 
 @pytest.mark.asyncio
-async def test_get_document_text_no_text(client):
+async def test_get_document_text_no_text(client, auth_headers):
     """GET /text em documento sem texto extraído deve retornar 409."""
     file_data = b"%PDF-minimal"
     with patch("app.api.routes.documents.extract_document_text") as mock_task:
@@ -79,6 +95,7 @@ async def test_get_document_text_no_text(client):
         resp = await client.post(
             "/documents",
             files={"file": ("doc.pdf", io.BytesIO(file_data), "application/pdf")},
+            headers=auth_headers,
         )
     doc_id = resp.json()["id"]
 

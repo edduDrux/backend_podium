@@ -11,7 +11,7 @@ O sistema recebe segmentos de transcrição de fala durante uma apresentação e
 ```
 Cliente (VR/Web)
       │
-      ├── HTTP (REST)  ──▶  FastAPI  ──▶  PostgreSQL
+      ├── HTTP (REST)  ──▶  FastAPI  ──▶  PostgreSQL (pgvector)
       │                         │
       └── WebSocket  ◀──  Redis Pub/Sub
                                 │
@@ -20,10 +20,10 @@ Cliente (VR/Web)
 ```
 
 **Fluxo principal:**
-1. Upload de documento PDF → extração de texto + chunking (Celery)
+1. Upload de documento PDF → extração de texto + chunking + embeddings (Celery)
 2. Criação de sessão (documento + perfil de simulação)
 3. Envio de segmentos de transcrição em tempo real → dispara task Celery
-4. Celery faz Full-Text Search no PostgreSQL, gera pergunta e publica no Redis
+4. Celery faz busca semântica via pgvector (cosine similarity), gera pergunta via LLM e publica no Redis
 5. WebSocket entrega a pergunta ao cliente
 
 ---
@@ -33,11 +33,14 @@ Cliente (VR/Web)
 | Camada | Tecnologia |
 |---|---|
 | Framework | FastAPI + Uvicorn |
-| Banco de dados | PostgreSQL 17 (async via asyncpg) |
+| Banco de dados | PostgreSQL 17 + pgvector (async via asyncpg) |
+| Busca semântica | pgvector (cosine similarity) com FTS como fallback |
+| Embeddings | OpenAI text-embedding-3-small (1536 dims) |
+| LLM | OpenAI GPT-4o-mini (padrão, configurável via `LLM_MODEL`) / Gemini Flash (fallback) |
 | Fila / Cache | Redis 7 |
 | Worker assíncrono | Celery |
 | ORM | SQLAlchemy 2.0 (async) |
-| Busca textual | PostgreSQL Full-Text Search |
+| Autenticação | JWT (HS256) via python-jose + bcrypt |
 | Containerização | Docker Compose |
 | Runtime | Python 3.10+ |
 
@@ -64,7 +67,7 @@ source .venv/bin/activate        # Linux/macOS
 # .venv\Scripts\activate         # Windows
 ```
 
-### 2. Instale as dependências
+### 2. Instale as depend��ncias
 
 ```bash
 pip install -e .
@@ -72,20 +75,24 @@ pip install -e .
 
 ### 3. Configure as variáveis de ambiente
 
-Crie um arquivo `.env` na raiz do projeto (ele está no `.gitignore` — nunca o commite):
+Copie o exemplo e preencha com seus valores:
 
-```env
-DATABASE_URL=postgresql+asyncpg://podium:podium@localhost:5433/podium
-REDIS_URL=redis://localhost:6379/0
-UPLOADS_DIR=./data/uploads
-ENVIRONMENT=dev
-
-# Integrações futuras (LLM / STT)
-OPENAI_API_KEY=sk-...
-GOOGLE_API_KEY=AIza...
+```bash
+cp .env.example .env
 ```
 
-> **Atenção:** se usar o Docker Compose abaixo, o PostgreSQL fica exposto na porta **5433** do host. Ajuste `DATABASE_URL` para usar `5433`.
+Variáveis principais:
+
+| Variável | Descrição | Padrão |
+|---|---|---|
+| `DATABASE_URL` | URL do PostgreSQL (asyncpg) | — |
+| `REDIS_URL` | URL do Redis | `redis://localhost:6379/0` |
+| `OPENAI_API_KEY` | Chave da OpenAI (embeddings + LLM + STT) | — |
+| `GOOGLE_API_KEY` | Chave do Google (Gemini, fallback) | — |
+| `LLM_MODEL` | Modelo LLM para geração de perguntas | `gpt-4o-mini` |
+| `JWT_SECRET` | Segredo para assinatura JWT | `change-me-in-production` |
+| `JWT_ALGORITHM` | Algoritmo JWT | `HS256` |
+| `JWT_EXPIRE_MINUTES` | Validade do token em minutos | `1440` (24h) |
 
 ### 4. Suba os serviços de infraestrutura
 
@@ -93,11 +100,17 @@ GOOGLE_API_KEY=AIza...
 docker-compose up -d
 ```
 
-Isso inicia:
-- PostgreSQL 17 → `localhost:5433`
+Isso inicia (com healthchecks):
+- PostgreSQL 17 + pgvector → `localhost:5433`
 - Redis 7 → `localhost:6379`
 
-### 5. Popule os perfis de simulação
+### 5. Aplique as migrations
+
+```bash
+alembic upgrade head
+```
+
+### 6. Popule os perfis de simulação
 
 ```bash
 python -m app.scripts.seed_profiles
@@ -118,7 +131,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 **Terminal 2 — Worker (Celery)**
 ```bash
-celery -A app.workers.celery_app worker --loglevel=info
+celery -A app.workers.celery_app worker --loglevel=info --pool=solo  # Windows
+celery -A app.workers.celery_app worker --loglevel=info              # Linux/macOS
 ```
 
 A API estará disponível em `http://localhost:8000`.
@@ -128,36 +142,63 @@ Documentação interativa: `http://localhost:8000/docs`
 
 ## Endpoints
 
+### Autenticação (`/auth`)
+
+| Método | Rota | Descrição | Auth |
+|---|---|---|---|
+| `POST` | `/auth/register` | Cria conta e retorna JWT | Não |
+| `POST` | `/auth/login` | Login (OAuth2 form) e retorna JWT | Não |
+| `GET` | `/auth/me` | Dados do usuário autenticado | Sim |
+
+**Exemplo de registro:**
+```bash
+curl -X POST http://localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "secret123"}'
+```
+
+**Exemplo de login:**
+```bash
+curl -X POST http://localhost:8000/auth/login \
+  -d "username=user@example.com&password=secret123"
+```
+
+O token retornado deve ser enviado no header: `Authorization: Bearer <token>`
+
 ### Documentos (`/documents`)
 
-| Método | Rota | Descrição |
-|---|---|---|
-| `POST` | `/documents` | Upload de PDF (inicia extração assíncrona) |
-| `GET` | `/documents/{id}` | Status e metadados do documento |
-| `GET` | `/documents/{id}/text` | Texto extraído completo |
-| `GET` | `/documents/{id}/chunks` | Lista os chunks de texto (paginado) |
-| `GET` | `/documents/{id}/search?q=...` | Busca full-text nos chunks |
+| Método | Rota | Descrição | Auth |
+|---|---|---|---|
+| `POST` | `/documents` | Upload de PDF/PPTX/DOCX (inicia extração assíncrona) | Sim |
+| `GET` | `/documents/{id}` | Status e metadados do documento | Não |
+| `GET` | `/documents/{id}/text` | Texto extraído completo | Não |
+| `GET` | `/documents/{id}/chunks` | Lista os chunks de texto (paginado) | Não |
+| `GET` | `/documents/{id}/search?q=...` | Busca full-text nos chunks | Não |
 
 **Status do documento:** `QUEUED` → `PROCESSING` → `CHUNKED` → `READY` / `FAILED`
 
 ### Perfis de simulação (`/profiles`)
 
-| Método | Rota | Descrição |
-|---|---|---|
-| `GET` | `/profiles` | Lista todos os perfis |
-| `GET` | `/profiles/{id}` | Detalhe de um perfil |
+| Método | Rota | Descrição | Auth |
+|---|---|---|---|
+| `GET` | `/profiles` | Lista todos os perfis | Não |
+| `GET` | `/profiles/{id}` | Detalhe de um perfil | Não |
 
 ### Sessões (`/sessions`)
 
-| Método | Rota | Descrição |
-|---|---|---|
-| `POST` | `/sessions` | Cria sessão (requer documento `CHUNKED` ou `READY`) |
-| `GET` | `/sessions/{id}` | Status da sessão |
-| `POST` | `/sessions/{id}/segments` | Envia segmento de transcrição |
-| `GET` | `/sessions/{id}/segments` | Lista segmentos recebidos |
-| `GET` | `/sessions/{id}/questions` | Lista perguntas geradas |
+| Método | Rota | Descrição | Auth |
+|---|---|---|---|
+| `POST` | `/sessions` | Cria sessão (requer documento `CHUNKED` ou `READY`) | Sim |
+| `GET` | `/sessions/{id}` | Status da sessão | Sim |
+| `POST` | `/sessions/{id}/segments` | Envia segmento de transcrição | Sim |
+| `GET` | `/sessions/{id}/segments` | Lista segmentos recebidos | Sim |
+| `GET` | `/sessions/{id}/questions` | Lista perguntas geradas | Sim |
+| `POST` | `/sessions/{id}/audio` | Upload de áudio para STT (202) | Sim |
+| `GET` | `/sessions/{id}/analytics` | Métricas da sessão | Sim |
+| `POST` | `/sessions/{id}/feedback` | Solicita feedback via LLM (202) | Sim |
+| `GET` | `/sessions/{id}/feedback` | Recupera feedback gerado | Sim |
 
-**Status da sessão:** `READY` → `RUNNING` (ao receber o primeiro segmento)
+**Status da sessão:** `READY` → `RUNNING` (ao receber o primeiro segmento) → `FINISHED`
 
 ### WebSocket
 
@@ -206,57 +247,18 @@ GET /health  →  { "status": "ok" }
 O worker aplica três camadas de proteção para evitar flood de perguntas:
 
 1. **Rate limit** — respeita `max_questions_per_minute` configurado no perfil
-2. **Cooldown** — intervalo mínimo de 15s entre perguntas consecutivas
-3. **Deduplicação** — detecta perguntas semanticamente repetidas antes de persistir
+2. **Cooldown** — intervalo mínimo configurável entre perguntas consecutivas
+3. **Deduplicação** — detecta perguntas semanticamente repetidas (SequenceMatcher > 0.75)
 
 ---
 
-## Estrutura do projeto
+## Testes
 
+```bash
+python -m pytest tests/
 ```
-app/
-├── api/
-│   ├── deps.py               # Dependências compartilhadas (DB session)
-│   └── routes/
-│       ├── documents.py
-│       ├── profiles.py
-│       ├── sessions.py
-│       └── websocket.py
-├── core/
-│   ├── config.py             # Settings via pydantic-settings (.env)
-│   ├── database.py           # Engine async + session factory
-│   ├── logging.py
-│   └── security.py
-├── models/                   # SQLAlchemy ORM models
-│   ├── document.py
-│   ├── document_chunk.py
-│   ├── profile.py
-│   ├── question.py
-│   ├── session.py
-│   ├── transcript.py
-│   └── user.py
-├── schemas/                  # Pydantic schemas (request/response)
-├── services/
-│   ├── document_service.py   # Extração de texto e chunking
-│   ├── llm_service.py        # Integração LLM (futuro)
-│   ├── redis_service.py      # Pub/Sub helpers
-│   ├── simulation_service.py # Geração de perguntas (stub/FTS)
-│   ├── storage_service.py    # Persistência de arquivos
-│   ├── stt_service.py        # Speech-to-Text (futuro)
-│   └── vector_service.py     # Busca vetorial (futuro)
-├── workers/
-│   ├── celery_app.py         # Configuração do Celery
-│   └── tasks.py              # Tasks: extração de doc + geração de perguntas
-├── prompts/                  # Prompts por perfil (Markdown)
-│   └── profiles/
-│       ├── academic.md
-│       ├── auditorium.md
-│       ├── corporate.md
-│       └── interview.md
-├── scripts/
-│   └── seed_profiles.py      # Popula perfis no banco
-└── main.py                   # Entrypoint FastAPI
-```
+
+Os testes usam SQLite em memória via aiosqlite para isolamento completo.
 
 ---
 

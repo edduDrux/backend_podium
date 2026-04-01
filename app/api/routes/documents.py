@@ -1,18 +1,18 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import select, func, desc
-from app.models.document_chunk import DocumentChunk
-from app.schemas.chunk import DocumentChunkOut, ChunkSearchHit
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-
-from app.workers.tasks import extract_document_text
+from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.core.enums import DocumentStatus
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
+from app.models.user import User
+from app.schemas.chunk import ChunkSearchHit, DocumentChunkOut
 from app.schemas.document import DocumentOut
 from app.services.storage_service import save_upload
-from fastapi import Query
+from app.workers.tasks import extract_document_text
 
 
 
@@ -23,6 +23,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 async def upload_document(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     ACCEPTED_TYPES = {
         "application/pdf",
@@ -44,6 +45,7 @@ async def upload_document(
         content_type=file.content_type,
         storage_path=storage_path,
         status=DocumentStatus.QUEUED,
+        user_id=current_user.id,
     )
     db.add(doc)
     await db.commit()

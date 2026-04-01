@@ -6,7 +6,7 @@ practice presentations in VR, and receive AI-generated contextual questions in r
 ## Stack
 
 - **API**: FastAPI + Pydantic v2, async everywhere
-- **Database**: PostgreSQL 17 (pgvector image) via SQLAlchemy 2.0 async + asyncpg
+- **Database**: PostgreSQL 17 (pgvector image) via SQLAlchemy 2.0 async + asyncpg — **pgvector extension required** (`CREATE EXTENSION vector`)
 - **Migrations**: Alembic (async, reads `DATABASE_URL` from `.env`)
 - **Task queue**: Celery + Redis (broker + Pub/Sub)
 - **Auth**: bcrypt + python-jose (JWT HS256, 24h expiry) — no passlib (Python 3.14)
@@ -31,7 +31,8 @@ python -m pytest tests/                                              # Tests
 ### 1. Document ingestion
 Client uploads PDF/PPTX/DOCX → `storage_service` saves file → `Document` created (status `QUEUED`)
 → Celery task `extract_document_text`: extracts text → chunks (1200 chars, 200 overlap)
-→ optionally generates OpenAI embeddings (stored as JSON) → status becomes `CHUNKED`.
+→ generates OpenAI embeddings via `text-embedding-3-small` (stored as pgvector `vector(1536)`)
+→ status becomes `READY` (with embeddings) or `CHUNKED` (FTS only, if no API key).
 
 ### 2. Session creation
 Client picks a processed document + simulation profile → `POST /sessions` creates
@@ -44,8 +45,9 @@ First segment flips session to `RUNNING`. Each segment fires Celery task
 
 ### 4. Question generation
 Task applies rate limiting + cooldown (per-profile config) + deduplication (SequenceMatcher > 0.75).
-`simulation_service` retrieves top-5 chunks via Postgres FTS, loads profile-specific prompt,
-calls `llm_service.generate_question()`. Falls back to template stub if no LLM key.
+Retrieves top-5 chunks via **pgvector cosine similarity** (`vector_service.search_similar_chunks`),
+with **Postgres FTS as fallback** when embeddings are unavailable.
+Loads profile-specific prompt, calls `llm_service.generate_question()`. Falls back to template stub if no LLM key.
 
 ### 5. Real-time delivery
 Question is saved to DB → published to Redis channel `session:{id}:events`
@@ -93,7 +95,7 @@ Seeded via `python -m app.scripts.seed_profiles`. Each has a prompt file + confi
 | Model | Table | Key fields |
 |-------|-------|-----------|
 | `Document` | `documents` | filename, content_type, storage_path, status, extracted_text |
-| `DocumentChunk` | `document_chunks` | document_id (FK), chunk_index, content, embedding (JSON) |
+| `DocumentChunk` | `document_chunks` | document_id (FK), chunk_index, content, embedding (pgvector `vector(1536)`) |
 | `SimulationProfile` | `simulation_profiles` | key (unique), name, description, config (JSON) |
 | `Session` | `sessions` | user_id (FK), document_id (FK), profile_id (FK), status, feedback_text |
 | `TranscriptSegment` | `transcript_segments` | session_id (FK), text, start_ms, end_ms |
@@ -112,7 +114,7 @@ Seeded via `python -m app.scripts.seed_profiles`. Each has a prompt file + confi
 ## What's Working
 
 - Full document pipeline: upload → extract text (PDF/PPTX/DOCX) → chunk → index
-- Postgres Full-Text Search for chunk retrieval
+- **pgvector semantic search** for chunk retrieval (cosine similarity), FTS as fallback
 - Simulation profiles (CRUD + seed script)
 - Sessions with auth (create, read, ownership check)
 - Transcript segments (create, list, triggers question generation)
@@ -123,7 +125,7 @@ Seeded via `python -m app.scripts.seed_profiles`. Each has a prompt file + confi
 - Session analytics (pure SQL metrics)
 - Auth: register, login, JWT, protected session endpoints
 - STT via Whisper API
-- Embeddings generated and stored (JSON column)
+- Embeddings generated via OpenAI `text-embedding-3-small` and stored as pgvector `vector(1536)`
 - Prompt templates per profile (`app/prompts/`)
 - 28 tests passing
 
@@ -136,7 +138,7 @@ Seeded via `python -m app.scripts.seed_profiles`. Each has a prompt file + confi
 - **`app/api/deps.py` is empty**: auth dependency lives in `auth.py` instead.
 
 ### Not yet implemented
-- **Vector similarity search in question generation**: embeddings are stored but `simulation_service` only uses Postgres FTS, not cosine similarity from `vector_service`.
+- ~~**Vector similarity search in question generation**~~: **DONE** — pgvector cosine similarity is the primary search, FTS is fallback.
 - **Auth on document endpoints**: documents are fully public.
 - **Auth on WebSocket**: no token verification on WS connections.
 - **PPTX/DOCX extraction**: code exists in `document_service.py` but is untested and the upload route accepts these content types.
@@ -144,10 +146,9 @@ Seeded via `python -m app.scripts.seed_profiles`. Each has a prompt file + confi
 
 ### Future roadmap
 1. Fix Alembic migration for `sessions.user_id`
-2. Wire vector similarity into question generation (hybrid FTS + cosine)
+2. ~~Wire vector similarity into question generation~~ **DONE**
 3. Add auth to document routes and WebSocket
 4. Improve question quality and prompt engineering
-5. Add pgvector extension for native vector ops
 6. Support audio ingestion pipeline end-to-end (STT → segments → questions)
 7. Add comprehensive analytics and feedback quality
 

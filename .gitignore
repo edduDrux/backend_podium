@@ -24,6 +24,9 @@ uploads/
 *.mp3
 *.m4a
 
+# Test artifacts
+test_podium.db
+
 # OS / editor
 .DS_Store
 .vscode/

@@ -43,6 +43,18 @@ async def client(reset_db):
         yield ac
 
 
+@pytest_asyncio.fixture
+async def auth_headers(client):
+    """Registra um usuário e retorna headers com Bearer token."""
+    resp = await client.post(
+        "/auth/register",
+        json={"email": "tester@example.com", "password": "senha123"},
+    )
+    assert resp.status_code == 201
+    token = resp.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Remove o arquivo de banco de dados após os testes."""
     try:

@@ -3,28 +3,11 @@ Testes de sessões. A task Celery é mockada para evitar dependência de worker.
 Todas as rotas de sessão requerem autenticação JWT.
 """
 import pytest
-import pytest_asyncio
 from unittest.mock import patch
 
 from app.models.document import Document
 from app.models.profile import SimulationProfile
 from tests.conftest import _TestSessionLocal
-
-
-# ---------------------------------------------------------------------------
-# Fixtures de autenticação
-# ---------------------------------------------------------------------------
-
-@pytest_asyncio.fixture
-async def auth_headers(client):
-    """Registra um usuário e retorna headers com Bearer token."""
-    resp = await client.post(
-        "/auth/register",
-        json={"email": "tester@example.com", "password": "senha123"},
-    )
-    assert resp.status_code == 201
-    token = resp.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
 
 
 # ---------------------------------------------------------------------------
