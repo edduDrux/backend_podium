@@ -9,25 +9,25 @@ from unittest.mock import AsyncMock, patch
 
 @pytest.mark.asyncio
 async def test_upload_invalid_extension(client):
-    """Arquivo .txt deve ser rejeitado (400 pelo content-type ou 415 pela extensão)."""
+    """Arquivo .txt deve ser rejeitado (422 pelo content-type ou 415 pela extensão)."""
     file_data = b"conteudo qualquer"
     resp = await client.post(
         "/documents",
         files={"file": ("relatorio.txt", io.BytesIO(file_data), "text/plain")},
     )
-    assert resp.status_code in (400, 415)
+    assert resp.status_code in (415, 422)
 
 
 @pytest.mark.asyncio
 async def test_upload_invalid_content_type(client):
-    """Content-type não aceito deve retornar 400."""
+    """Content-type não aceito deve retornar 422."""
     file_data = b"%PDF-fake"
     resp = await client.post(
         "/documents",
         files={"file": ("script.exe", io.BytesIO(file_data), "application/x-msdownload")},
     )
-    # pode ser 400 (content-type) ou 415 (extensão) dependendo da ordem
-    assert resp.status_code in (400, 415)
+    # pode ser 422 (content-type) ou 415 (extensão) dependendo da ordem
+    assert resp.status_code in (415, 422)
 
 
 @pytest.mark.asyncio

@@ -19,9 +19,14 @@ dependencies = [
   "redis",
   "pypdf",
   "httpx",
+  "openai>=1.0",
+  "pgvector",
   # Documentos
   "python-pptx",
   "python-docx",
+  # Áudio
+  "pydub",
+  "audioop-lts",  # pydub needs audioop, removed from Python 3.13+
   # Autenticação
   "bcrypt",
   "python-jose[cryptography]",

@@ -3,7 +3,7 @@ import difflib
 from datetime import datetime, timedelta, timezone
 
 from celery.utils.log import get_task_logger
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, desc, func, select
 
 from app.workers.celery_app import celery
 from app.core.database import AsyncSessionLocal
@@ -15,7 +15,6 @@ from app.models.question import Question
 from app.models.session import Session
 from app.models.transcript import TranscriptSegment
 from app.services.redis_service import publish_session_event
-from app.services.simulation_service import generate_question_stub
 from app.services.document_service import extract_text, chunk_text
 
 logger = get_task_logger(__name__)
@@ -25,15 +24,15 @@ logger = get_task_logger(__name__)
 # STT task
 # ---------------------------------------------------------------------------
 
-@celery.task(name="process_audio_transcription")
-def process_audio_transcription(session_id: int, file_path: str, filename: str) -> dict:
+@celery.task(name="transcribe_and_process_audio")
+def transcribe_and_process_audio(session_id: int, file_path: str) -> dict:
     # pool=solo no Windows suporta asyncio.run()
-    return asyncio.run(_process_audio_transcription_async(session_id, file_path, filename))
+    return asyncio.run(_transcribe_and_process_audio_async(session_id, file_path))
 
 
-async def _process_audio_transcription_async(
-    session_id: int, file_path: str, filename: str
-) -> dict:
+async def _transcribe_and_process_audio_async(session_id: int, file_path: str) -> dict:
+    from pathlib import Path
+
     async with AsyncSessionLocal() as db:
         session = await db.get(Session, session_id)
         if not session:
@@ -42,36 +41,38 @@ async def _process_audio_transcription_async(
         try:
             from app.services.stt_service import transcribe_audio
 
-            segments = await transcribe_audio(file_path, filename)
-            if not segments:
+            text = await transcribe_audio(Path(file_path))
+            if not text.strip():
                 return {"ok": True, "session_id": session_id, "segments_created": 0}
 
-            created = 0
-            for seg in segments:
-                transcript_seg = TranscriptSegment(
-                    session_id=session_id,
-                    text=seg.text,
-                    start_ms=seg.start_ms,
-                    end_ms=seg.end_ms,
-                )
-                db.add(transcript_seg)
-                if session.status == SessionStatus.READY:
-                    session.status = SessionStatus.RUNNING
+            segment = TranscriptSegment(
+                session_id=session_id,
+                text=text,
+            )
+            db.add(segment)
 
-                await db.flush()
-                generate_question_for_segment.delay(session_id, transcript_seg.id)
-                created += 1
+            if session.status == SessionStatus.READY:
+                session.status = SessionStatus.RUNNING
 
             await db.commit()
+            await db.refresh(segment)
+
+            generate_question_for_segment.delay(session_id, segment.id)
+
             logger.info(
-                "STT: sessão %s — %s segmentos criados de '%s'",
-                session_id, created, filename,
+                "STT: sessão %s — transcrição completa (%d chars)",
+                session_id, len(text),
             )
-            return {"ok": True, "session_id": session_id, "segments_created": created}
+            return {"ok": True, "session_id": session_id, "segments_created": 1}
 
         except Exception as exc:
             logger.exception("Falha no STT para sessão %s: %s", session_id, exc)
             return {"ok": False, "session_id": session_id, "error": str(exc)}
+        finally:
+            # Limpa arquivo temporário de áudio
+            audio_path = Path(file_path)
+            if audio_path.exists():
+                audio_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -134,14 +135,9 @@ async def _generate_session_feedback_async(session_id: int) -> dict:
 
         feedback_text = None
         try:
-            from app.services.llm_service import _call_openai, _call_gemini
-            from app.core.config import settings
+            from app.services.llm_service import call_llm
 
-            if settings.openai_api_key:
-                feedback_text = await _call_openai(prompt, settings.openai_api_key)
-            elif settings.google_api_key:
-                feedback_text = await _call_gemini(prompt, settings.google_api_key)
-
+            feedback_text = await call_llm(prompt)
             if feedback_text:
                 feedback_text = feedback_text.strip()
         except Exception as exc:
@@ -211,23 +207,29 @@ async def _extract_document_text_async(document_id: int) -> dict:
                 delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
             )
 
-            # gera embeddings (opcional — requer OPENAI_API_KEY)
-            from app.services.vector_service import get_embedding
-            embeddings: list[list[float] | None] = []
-            for c in chunks:
-                emb = await get_embedding(c)
-                embeddings.append(emb)
-
-            # salva chunks novos com embeddings
-            for i, (c, emb) in enumerate(zip(chunks, embeddings)):
-                db.add(DocumentChunk(
+            # salva chunks novos
+            chunk_objs: list[DocumentChunk] = []
+            for i, c in enumerate(chunks):
+                obj = DocumentChunk(
                     document_id=doc.id,
                     chunk_index=i,
                     content=c,
-                    embedding=emb,
-                ))
+                )
+                db.add(obj)
+                chunk_objs.append(obj)
 
             doc.status = DocumentStatus.CHUNKED
+            await db.flush()
+
+            # gera embeddings em batch (opcional — requer OPENAI_API_KEY)
+            from app.services.vector_service import embed_chunks
+            await embed_chunks(db, chunk_objs)
+
+            # READY = chunks + embeddings prontos; CHUNKED = só FTS
+            has_embeddings = any(c.embedding is not None for c in chunk_objs)
+            if has_embeddings:
+                doc.status = DocumentStatus.READY
+
             await db.commit()
 
             logger.info(
@@ -270,10 +272,13 @@ async def _generate_question_for_segment_async(session_id: int, segment_id: int)
             return {"ok": False, "error": "Sessão não encontrada"}
 
         profile_config = {}
+        profile_key = "general"
         if session.profile_id is not None:
             profile = await db.get(SimulationProfile, session.profile_id)
-            if profile and isinstance(profile.config, dict):
-                profile_config = profile.config
+            if profile:
+                profile_key = profile.key
+                if isinstance(profile.config, dict):
+                    profile_config = profile.config
 
         max_questions_per_minute = int(profile_config.get("max_questions_per_minute", 3))
         if max_questions_per_minute < 1:
@@ -321,13 +326,83 @@ async def _generate_question_for_segment_async(session_id: int, segment_id: int)
                     "reason": "cooldown",
                 }
 
-        doc = None
+        # --- Busca chunks relevantes: vector search → FTS fallback ---
+        chunks_content: list[str] = []
+        evidence_chunk_ids: list[int] = []
+
         if session.document_id is not None:
-            doc = await db.get(Document, session.document_id)
+            # Tenta busca vetorial primeiro
+            try:
+                from app.services.vector_service import search_similar_chunks
 
-        payload = await generate_question_stub(db, session_id=session_id, segment_text=segment.text)
+                vector_chunks = await search_similar_chunks(
+                    db, session_id, segment.text, limit=5,
+                )
+                if vector_chunks:
+                    evidence_chunk_ids = [c.id for c in vector_chunks]
+                    chunks_content = [c.content for c in vector_chunks]
+            except Exception as exc:
+                logger.debug("Vector search falhou, usando FTS: %s", exc)
 
-        if last_question and _is_similar_question_text(payload["question_text"], last_question.question_text):
+            # FTS fallback se vector search não retornou resultados
+            if not chunks_content:
+                tsv = func.to_tsvector("portuguese", DocumentChunk.content)
+                tsq = func.plainto_tsquery("portuguese", segment.text)
+                rank = func.ts_rank_cd(tsv, tsq)
+
+                fts_stmt = (
+                    select(DocumentChunk, rank.label("rank"))
+                    .where(DocumentChunk.document_id == session.document_id)
+                    .where(tsv.op("@@")(tsq))
+                    .order_by(desc(rank))
+                    .limit(5)
+                )
+                rows = (await db.execute(fts_stmt)).all()
+                if rows:
+                    evidence_chunk_ids = [c.id for c, _ in rows]
+                    chunks_content = [c.content for c, _ in rows]
+
+        # --- Perguntas anteriores para evitar repetição ---
+        prev_stmt = (
+            select(Question.question_text)
+            .where(Question.session_id == session_id)
+            .order_by(Question.id.desc())
+            .limit(10)
+        )
+        previous_questions = [
+            row[0] for row in (await db.execute(prev_stmt)).all()
+        ]
+
+        # --- Chamada real ao LLM ---
+        from app.services.llm_service import generate_question
+
+        payload = await generate_question(
+            profile_key=profile_key,
+            document_chunks=chunks_content,
+            transcription_segment=segment.text,
+            previous_questions=previous_questions,
+        )
+
+        # Fallback stub se o LLM retornou None
+        if payload is None:
+            topic = segment.text.strip().replace("\n", " ")[:80].rstrip() or "esse ponto"
+            evidence_point = "algum ponto relevante do documento"
+            if chunks_content:
+                snippet = chunks_content[0].strip().replace("\n", " ")
+                evidence_point = snippet[:120].rstrip() + ("..." if len(snippet) > 120 else "")
+            payload = {
+                "question_text": (
+                    f"Explique melhor: {topic}. "
+                    f"Como isso se relaciona com {evidence_point}?"
+                ),
+                "intent": "general",
+                "difficulty": 3,
+            }
+
+        # --- Deduplicação ---
+        if last_question and _is_similar_question_text(
+            payload["question_text"], last_question.question_text
+        ):
             payload["question_text"] = f"{payload['question_text']} Pode trazer um exemplo prático?"
 
             if _is_similar_question_text(payload["question_text"], last_question.question_text):
@@ -344,7 +419,7 @@ async def _generate_question_for_segment_async(session_id: int, segment_id: int)
             question_text=payload["question_text"],
             intent=payload["intent"],
             difficulty=payload["difficulty"],
-            evidence_chunk_ids=payload["evidence_chunk_ids"],
+            evidence_chunk_ids=evidence_chunk_ids,
         )
         db.add(question)
         await db.commit()
@@ -373,5 +448,4 @@ async def _generate_question_for_segment_async(session_id: int, segment_id: int)
             "segment_id": segment_id,
             "created": True,
             "question_id": question.id,
-            "has_document": doc is not None,
         }

@@ -33,7 +33,7 @@ async def upload_document(
     }
     if file.content_type not in ACCEPTED_TYPES:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail="Tipo de arquivo não suportado. Envie PDF, PPTX ou DOCX.",
         )
 

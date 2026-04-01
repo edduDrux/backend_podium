@@ -1,4 +1,5 @@
-import os
+import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import select
@@ -21,7 +22,7 @@ from app.services.analytics_service import get_session_analytics
 from app.workers.tasks import (
     generate_question_for_segment,
     generate_session_feedback,
-    process_audio_transcription,
+    transcribe_and_process_audio,
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -172,38 +173,50 @@ async def upload_audio(
     session_id: int,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Faz upload de um arquivo de áudio (wav, mp3, m4a, webm).
-    Dispara transcrição via Whisper de forma assíncrona.
-    Os segmentos aparecem em GET /sessions/{id}/segments após processamento.
+    Upload de áudio para transcrição via Whisper.
+    Aceita mp3, mp4, mpeg, mpga, m4a, wav, webm (até 350MB).
+    Retorna 202 com task_id para polling.
     """
     session = await db.get(Session, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Sessão não encontrada.")
+    if session.user_id and session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Acesso negado.")
 
-    ACCEPTED_AUDIO = {"audio/wav", "audio/mpeg", "audio/mp4", "audio/webm", "audio/ogg"}
-    if file.content_type not in ACCEPTED_AUDIO:
+    ACCEPTED_EXTENSIONS = {"mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm"}
+    ext = Path(file.filename).suffix.lstrip(".").lower() if file.filename else ""
+    if ext not in ACCEPTED_EXTENSIONS:
         raise HTTPException(
-            status_code=400,
-            detail=f"Tipo de áudio não suportado: {file.content_type}. Use wav, mp3, m4a ou webm.",
+            status_code=422,
+            detail=f"Formato não suportado: .{ext}. Use mp3, mp4, m4a, wav ou webm.",
         )
 
-    # Salva o arquivo localmente
-    uploads_dir = os.path.join(settings.uploads_dir, "audio")
-    os.makedirs(uploads_dir, exist_ok=True)
-    dest = os.path.join(uploads_dir, f"session_{session_id}_{file.filename}")
+    max_bytes = settings.max_audio_upload_mb * 1024 * 1024
+    uploads_dir = Path(settings.uploads_dir) / "audio"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    dest = uploads_dir / f"{uuid.uuid4().hex}.{ext}"
 
-    contents = await file.read()
-    with open(dest, "wb") as f_out:
-        f_out.write(contents)
+    total = 0
+    with dest.open("wb") as f_out:
+        while chunk := await file.read(1024 * 1024):
+            total += len(chunk)
+            if total > max_bytes:
+                dest.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Arquivo excede o limite de {settings.max_audio_upload_mb}MB.",
+                )
+            f_out.write(chunk)
 
-    process_audio_transcription.delay(session_id, dest, file.filename)
+    result = transcribe_and_process_audio.delay(session_id, str(dest))
 
     return {
         "detail": "Áudio recebido. Transcrição em andamento.",
         "session_id": session_id,
-        "filename": file.filename,
+        "task_id": result.id,
     }
 
 

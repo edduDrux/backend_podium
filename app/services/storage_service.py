@@ -8,7 +8,7 @@ from app.core.config import settings
 MAX_PDF_SIZE = 100 * 1024 * 1024   # 100 MB
 MAX_AUDIO_SIZE = 50 * 1024 * 1024  # 50 MB
 
-ALLOWED_EXTENSIONS = {"pdf", "pptx", "docx", "wav", "mp3", "mp4", "webm", "ogg"}
+ALLOWED_EXTENSIONS = {"pdf", "pptx", "ppt", "docx", "doc", "wav", "mp3", "mp4", "webm", "ogg"}
 AUDIO_EXTENSIONS = {"wav", "mp3", "mp4", "webm", "ogg"}
 
 

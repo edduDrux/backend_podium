@@ -1,24 +1,25 @@
 import re
+from pathlib import Path
+
 from pypdf import PdfReader
 
 
-def extract_text_from_pdf(path: str) -> str:
-    reader = PdfReader(path)
+def _extract_text_from_pdf(file_path: Path) -> str:
+    reader = PdfReader(str(file_path))
     parts: list[str] = []
 
     for page in reader.pages:
-        txt = page.extract_text() or ""
-        txt = txt.strip()
+        txt = (page.extract_text() or "").strip()
         if txt:
             parts.append(txt)
 
     return "\n\n".join(parts)
 
 
-def extract_text_from_pptx(path: str) -> str:
+def _extract_text_from_pptx(file_path: Path) -> str:
     from pptx import Presentation  # type: ignore
 
-    prs = Presentation(path)
+    prs = Presentation(str(file_path))
     parts: list[str] = []
 
     for slide in prs.slides:
@@ -26,7 +27,7 @@ def extract_text_from_pptx(path: str) -> str:
         for shape in slide.shapes:
             if shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
-                    line = " ".join(run.text for run in para.runs).strip()
+                    line = para.text.strip()
                     if line:
                         slide_texts.append(line)
         if slide_texts:
@@ -35,29 +36,57 @@ def extract_text_from_pptx(path: str) -> str:
     return "\n\n".join(parts)
 
 
-def extract_text_from_docx(path: str) -> str:
+def _extract_text_from_docx(file_path: Path) -> str:
     from docx import Document as DocxDocument  # type: ignore
 
-    doc = DocxDocument(path)
-    parts = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
-    return "\n\n".join(parts)
+    doc = DocxDocument(str(file_path))
+    parts: list[str] = []
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text:
+            parts.append(text)
+
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+_SUFFIX_MAP: dict[str, callable] = {
+    ".pdf": _extract_text_from_pdf,
+    ".pptx": _extract_text_from_pptx,
+    ".ppt": _extract_text_from_pptx,
+    ".docx": _extract_text_from_docx,
+    ".doc": _extract_text_from_docx,
+}
+
+_CONTENT_TYPE_MAP: dict[str, callable] = {
+    "application/pdf": _extract_text_from_pdf,
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": _extract_text_from_pptx,
+    "application/vnd.ms-powerpoint": _extract_text_from_pptx,
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": _extract_text_from_docx,
+    "application/msword": _extract_text_from_docx,
+}
 
 
 def extract_text(path: str, content_type: str) -> str:
-    """Despacha para o extrator correto com base no content_type."""
-    if content_type == "application/pdf":
-        return extract_text_from_pdf(path)
-    if content_type in (
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/vnd.ms-powerpoint",
-    ):
-        return extract_text_from_pptx(path)
-    if content_type in (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-    ):
-        return extract_text_from_docx(path)
-    raise ValueError(f"Tipo de arquivo não suportado: {content_type}")
+    """Detecta tipo pelo sufixo do arquivo, com fallback para content_type."""
+    file_path = Path(path)
+    suffix = file_path.suffix.lower()
+
+    extractor = _SUFFIX_MAP.get(suffix) or _CONTENT_TYPE_MAP.get(content_type)
+    if extractor is None:
+        raise ValueError(f"Tipo de arquivo não suportado: {suffix} ({content_type})")
+
+    return extractor(file_path)
 
 
 def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> list[str]:

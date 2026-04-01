@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     # LLM — pelo menos uma deve estar configurada para perguntas reais
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
+    llm_model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
+
+    # Áudio
+    max_audio_upload_mb: int = Field(default=350, alias="MAX_AUDIO_UPLOAD_MB")
 
     # JWT
     jwt_secret: str = Field(default="change-me-in-production", alias="JWT_SECRET")

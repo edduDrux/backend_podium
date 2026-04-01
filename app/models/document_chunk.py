@@ -1,4 +1,7 @@
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, Text, func
+from typing import Optional
+
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -20,8 +23,9 @@ class DocumentChunk(Base):
     content: Mapped[str] = mapped_column(Text)
 
     # Embedding gerado via OpenAI text-embedding-3-small (1536 dims)
-    # Armazenado como JSON (lista de floats) — compatível com SQLite e PostgreSQL
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(
+        Vector(1536), nullable=True
+    )
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),

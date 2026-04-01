@@ -1,655 +1,162 @@
-# Claude Context — Projeto Podium
+# Podium Backend
 
-## 1. Resumo do projeto
+Python backend for a VR public-speaking training platform. Users upload documents,
+practice presentations in VR, and receive AI-generated contextual questions in real time.
 
-**Podium** é um backend em Python para uma plataforma imersiva de treinamento de oratória com VR + IA/LLM.
+## Stack
 
-Objetivo do backend:
+- **API**: FastAPI + Pydantic v2, async everywhere
+- **Database**: PostgreSQL 17 (pgvector image) via SQLAlchemy 2.0 async + asyncpg
+- **Migrations**: Alembic (async, reads `DATABASE_URL` from `.env`)
+- **Task queue**: Celery + Redis (broker + Pub/Sub)
+- **Auth**: bcrypt + python-jose (JWT HS256, 24h expiry) — no passlib (Python 3.14)
+- **Document parsing**: pypdf, python-pptx, python-docx
+- **LLM**: OpenAI GPT-4o-mini (primary), Google Gemini 1.5 Flash (fallback), stub if neither configured
+- **STT**: OpenAI Whisper API (`whisper-1`)
+- **Tests**: pytest + pytest-asyncio + aiosqlite (SQLite in-memory), 28 tests passing
 
-- receber e processar **documentos** da apresentação do usuário;
-- receber **fala transcrita em segmentos** durante a apresentação;
-- correlacionar o conteúdo do documento com a fala;
-- gerar **perguntas contextuais** e, depois, **feedback de performance**;
-- servir como **middleware** entre frontend/VR client e serviços cognitivos.
+## Infrastructure
 
-O usuário do projeto é iniciante em Python e VR, então as respostas devem priorizar:
-
-- simplicidade;
-- implementação incremental;
-- código claro;
-- poucas mudanças por etapa;
-- foco em MVP funcional antes de sofisticação.
-
----
-
-## 2. Escopo funcional do produto
-
-### Entrada de documentos
-
-O sistema deve aceitar:
-
-- **PDF** como prioridade do MVP;
-- suporte futuro para **PPTX** e **DOCX/DOCS**.
-
-O texto extraído do documento será usado como **base de conhecimento** para perguntas contextualizadas.
-
-### Entrada da apresentação
-
-Durante a apresentação, o frontend/VR client enviará:
-
-- idealmente **segmentos de texto transcritos** em tempo real;
-- no futuro, também poderá enviar **áudio** para STT.
-
-### Saída esperada
-
-O backend deve:
-
-- gerar perguntas sobre a apresentação;
-- variar o estilo conforme o perfil de simulação;
-- no futuro, gerar feedback de performance.
-
----
-
-## 3. Perfis de simulação
-
-Existem 4 perfis principais:
-
-1. **Defesa Acadêmica**
-   - foco em rigor técnico;
-   - fundamentação;
-   - profundidade conceitual;
-   - estilo semelhante a banca de TCC.
-
-2. **Ambiente Corporativo**
-   - foco em pitch;
-   - persuasão;
-   - clareza;
-   - gestão de tempo;
-   - visão de negócio.
-
-3. **Entrevista de Emprego**
-   - foco em currículo;
-   - experiência;
-   - comportamento;
-   - justificativas e exemplos.
-
-4. **Auditório**
-   - foco em pressão;
-   - variedade de perguntas;
-   - improviso;
-   - exposição a perguntas mais amplas e imprevisíveis.
-
-Esses perfis devem influenciar:
-
-- tom;
-- rigor;
-- frequência de perguntas;
-- follow-ups;
-- intenções das perguntas.
-
----
-
-## 4. Requisitos técnicos principais
-
-### Requisitos de backend
-
-- usar **Python**;
-- usar **FastAPI**;
-- usar **asyncio** sempre que fizer sentido;
-- suportar crescimento futuro;
-- manter arquitetura modular.
-
-### Requisitos de UX / latência
-
-- a geração de perguntas não deve quebrar a imersão;
-- ideal de latência para pergunta: **3 a 5 segundos**;
-- por isso o sistema deve preferir:
-  - documento pré-processado antes da sessão;
-  - fala recebida em segmentos curtos;
-  - processamento assíncrono.
-
-### Requisitos de IA
-
-- usar prompts estruturados;
-- reduzir alucinação;
-- evitar repetição;
-- basear perguntas em evidências do documento.
-
----
-
-## 5. Arquitetura decidida para o MVP
-
-### Stack principal
-
-- **FastAPI** para API;
-- **PostgreSQL** como banco principal;
-- **Redis** para broker e Pub/Sub;
-- **Celery** para tarefas assíncronas;
-- **Docker Compose** para infraestrutura local;
-- armazenamento local inicialmente para uploads;
-- suporte futuro a MinIO/S3;
-- busca textual com **Postgres Full-Text Search** no MVP;
-- busca vetorial com **pgvector** no futuro.
-
-### Estratégia do MVP
-
-O MVP não começa com áudio em tempo real complexo.
-A abordagem priorizada é:
-
-1. usuário envia documento antes da apresentação;
-2. backend extrai texto;
-3. backend quebra em chunks;
-4. backend cria sessão com perfil;
-5. frontend envia **segmentos de texto** da apresentação;
-6. backend gera perguntas com base nesses segmentos + chunks relevantes do documento.
-
----
-
-## 6. Estrutura de pastas escolhida
-
-```text
-podium_backend/
-  app/
-    main.py
-    core/
-      config.py
-      logging.py
-      security.py
-      database.py
-    api/
-      routes/
-        documents.py
-        sessions.py
-        profiles.py
-        websocket.py
-      deps.py
-    models/
-      user.py
-      document.py
-      document_chunk.py
-      session.py
-      profile.py
-      question.py
-      transcript.py
-    schemas/
-      document.py
-      chunk.py
-      session.py
-      profile.py
-      question.py
-      transcript.py
-    services/
-      storage_service.py
-      document_service.py
-      vector_service.py
-      stt_service.py
-      llm_service.py
-      simulation_service.py
-      analytics_service.py
-      redis_service.py
-    workers/
-      celery_app.py
-      tasks.py
-    prompts/
-      base.md
-      profiles/
-        academic.md
-        corporate.md
-        interview.md
-        auditorium.md
-    scripts/
-      seed_profiles.py
-      db_indexes.py
-  tests/
-  docker-compose.yml
-  pyproject.toml
-  .env
-
+```bash
+docker-compose up -d          # Postgres (port 5433) + Redis (port 6379)
+alembic upgrade head
+python -m app.scripts.seed_profiles
+uvicorn app.main:app --reload                                        # Terminal 1
+celery -A app.workers.celery_app worker --loglevel=info --pool=solo  # Terminal 2
+python -m pytest tests/                                              # Tests
 ```
 
-## 7. Estado atual do projeto
-
-### Já implementado
-
-O projeto já tem a base abaixo funcionando:
-
-#### Documentos
-
-- upload de PDF;
-- armazenamento local do arquivo;
-- persistência do documento no Postgres;
-- `GET` de documento por id.
-
-#### Processamento assíncrono
-
-- Celery configurado;
-- Redis como broker;
-- task de processamento do documento;
-- extração de texto do PDF via `pypdf`.
-
-#### Texto extraído
-
-- o texto extraído já é salvo em `Document.extracted_text`.
-
-#### Chunking
-
-- o texto já é quebrado em chunks;
-- chunks são persistidos na tabela `document_chunks`.
-
-#### Busca
-
-- endpoint para listar chunks do documento;
-- endpoint para buscar chunks relevantes com Postgres Full-Text Search.
-
-### Status atuais usados
-
-Status de documento já utilizados:
-
-- `QUEUED`
-- `PROCESSING`
-- `EXTRACTED`
-- `CHUNKED`
-- `FAILED`
-
-**Observação:**
-
-- no fluxo atual, após chunking o documento pode ser considerado pronto;
-- pode haver uso futuro de `READY` como alias semântico de “pronto para sessão”.
-
----
-
-## 8. Fluxo de dados do MVP
-
-### Fluxo 1 — Ingestão de documento
-
-1. cliente envia PDF;
-2. API salva arquivo;
-3. API cria registro `Document`;
-4. API enfileira task Celery;
-5. worker:
-   - extrai texto;
-   - salva em `extracted_text`;
-   - gera chunks;
-   - salva chunks;
-   - marca documento como `CHUNKED`.
-
-### Fluxo 2 — Sessão de simulação
-
-1. cliente escolhe um documento já processado;
-2. cliente escolhe um perfil;
-3. backend cria `Session(status="READY")`.
-
-### Fluxo 3 — Segmentos da apresentação
-
-1. frontend envia `TranscriptSegment`;
-2. backend salva segmento;
-3. se necessário, muda sessão para `RUNNING`;
-4. backend gera pergunta baseada em:
-   - texto do segmento;
-   - chunks relevantes do documento;
-   - perfil da sessão;
-   - histórico recente.
-
-### Fluxo 4 — Entrega em tempo real
-
-1. pergunta é salva;
-2. evento é publicado no Redis;
-3. WebSocket da sessão recebe e repassa ao cliente VR.
-
----
-
-## 9. Modelos de domínio esperados
-
-### Document
-
-**Campos esperados:**
-
-- `id`
-- `filename`
-- `content_type`
-- `storage_path`
-- `status`
-- `extracted_text`
-- `created_at`
-
-### DocumentChunk
-
-**Campos esperados:**
-
-- `id`
-- `document_id`
-- `chunk_index`
-- `content`
-- `created_at`
-
-### SimulationProfile
-
-**Campos esperados:**
-
-- `id`
-- `key`
-- `name`
-- `description`
-- `config`
-- `created_at`
-
-### Session
-
-**Campos esperados:**
-
-- `id`
-- `document_id`
-- `profile_id`
-- `status`
-- `created_at`
-
-**Status esperados:**
-
-- `READY`
-- `RUNNING`
-- `FINISHED`
-- `FAILED`
-
-### TranscriptSegment
-
-**Campos esperados:**
-
-- `id`
-- `session_id`
-- `text`
-- `start_ms`
-- `end_ms`
-- `created_at`
-
-### Question
-
-**Campos esperados:**
-
-- `id`
-- `session_id`
-- `question_text`
-- `intent`
-- `difficulty`
-- `evidence_chunk_ids`
-- `created_at`
-
----
-
-## 10. Endpoints já existentes ou previstos
-
-### Documents
-
-**Já existem ou devem existir:**
-
-- `POST /documents`
-- `GET /documents/{document_id}`
-- `GET /documents/{document_id}/text`
-- `GET /documents/{document_id}/chunks`
-- `GET /documents/{document_id}/search?q=...`
-
-### Profiles
-
-**Devem existir:**
-
-- `GET /profiles`
-- `GET /profiles/{profile_id}`
-
-### Sessions
-
-**Devem existir:**
-
-- `POST /sessions`
-- `GET /sessions/{session_id}`
-- `POST /sessions/{session_id}/segments`
-- `GET /sessions/{session_id}/segments`
-- `GET /sessions/{session_id}/questions`
-
-### WebSocket
-
-**Deve existir:**
-
-- `WS /sessions/{session_id}/live`
-
----
-
-## 11. Regras de negócio importantes
-
-### Documento
-
-- no MVP, apenas `application/pdf`;
-- sessão só pode ser criada se o documento estiver processado;
-- considerar documento pronto quando status estiver em `CHUNKED` ou `READY`.
-
-### Segmentos
-
-- segmentos são preferidos em vez de áudio bruto para reduzir latência;
-- primeiro segmento pode mudar a sessão de `READY` para `RUNNING`.
-
-### Perguntas
-
-- devem ser baseadas no documento;
-- devem evitar repetição;
-- devem respeitar o perfil;
-- devem ter `evidence_chunk_ids` quando possível;
-- quando não houver chunk relevante, gerar pergunta genérica baseada no segmento.
-
-### Anti-spam
-
-Devem existir guardrails simples:
-
-- cooldown entre perguntas;
-- limite de perguntas por minuto;
-- evitar duplicatas triviais.
-
----
-
-## 12. Estratégia de RAG do MVP
-
-### Versão atual
-
-O MVP usa:
-
-- chunks persistidos no Postgres;
-- Full-Text Search com:
-  - `to_tsvector('portuguese', content)`
-  - `plainto_tsquery('portuguese', q)`
-  - `ts_rank_cd(...)`
-
-### Versão futura
-
-Quando necessário, evoluir para:
-
-- embeddings;
-- `pgvector`;
-- recuperação semântica híbrida.
-
-### Decisão importante
-
-Não introduzir complexidade de embeddings cedo demais.
-
-Primeiro consolidar:
-
-- documentos;
-- perfis;
-- sessões;
-- segmentos;
-- perguntas em tempo real.
-
----
-
-## 13. Ordem de implementação definida
-
-A ordem correta decidida para o projeto é:
-
-1. consolidar documentos + chunks + busca;
-2. implementar profiles;
-3. implementar sessions;
-4. implementar transcript segments;
-5. implementar questions com geração stub via Celery;
-6. implementar Redis Pub/Sub + WebSocket;
-7. adicionar guardrails de repetição e frequência;
-8. só depois integrar LLM real;
-9. depois feedback e analytics.
-
-Essa ordem não deve ser invertida sem necessidade real.
-
----
-
-## 14. Filosofia de implementação
-
-### Prioridades
-
-- primeiro funcionar;
-- depois refinar;
-- sempre preferir MVP demonstrável;
-- evitar abstração excessiva cedo;
-- manter código legível para iniciante.
-
-### Decisões preferidas
-
-- mudanças pequenas e incrementais;
-- poucos arquivos por etapa;
-- rotas claras;
-- validações explícitas;
-- respostas diretas;
-- evitar refatoração ampla quando não necessária.
-
-### Evitar
-
-- reestruturar todo o projeto sem necessidade;
-- introduzir autenticação cedo;
-- introduzir Alembic cedo se o projeto ainda está em MVP;
-- adicionar áudio complexo antes da pipeline de texto estar sólida;
-- adicionar pgvector antes de sessões/perguntas funcionarem.
-
----
-
-## 15. Como responder em futuras requisições
-
-Ao responder sobre o projeto Podium:
-
-1. assumir que este contexto já é conhecido;
-2. evitar repetir a visão geral do projeto;
-3. responder focando no próximo passo prático;
-4. preferir:
-   - lista curta de ações;
-   - arquivos a criar/editar;
-   - código pronto;
-   - comandos exatos;
-   - critérios de teste;
-5. quando o pedido for para usar Codex/Claude Code:
-   - gerar prompts completos;
-   - em blocos separados;
-   - com escopo específico;
-   - sem explicações longas;
-6. economizar tokens:
-   - não repetir stack inteira;
-   - não repetir estrutura de pastas inteira, salvo quando necessário;
-   - não redefinir o produto do zero;
-   - não explicar conceitos básicos já decididos.
-
----
-
-## 16. Padrão esperado para sugestões de código
-
-Quando sugerir código para o Podium:
-
-- usar FastAPI;
-- usar SQLAlchemy async;
-- usar Pydantic v2;
-- seguir o estilo já existente do projeto;
-- respeitar `AsyncSession`, `Depends(get_db)` e `HTTPException`;
-- usar nomes consistentes com os arquivos já escolhidos;
-- não criar dependências desnecessárias.
-
-### Quando gerar rotas
-
-- usar `APIRouter`;
-- `response_model` claro;
-- validações com `Query` quando houver paginação e limites.
-
-### Quando gerar tasks
-
-- usar Celery;
-- abrir `AsyncSessionLocal`;
-- tratar erro sem quebrar o worker;
-- retornar dict simples de resultado.
-
----
-
-## 17. Contexto sobre o desenvolvedor
-
-**Informações relevantes:**
-
-- o autor do projeto é iniciante em Python;
-- precisa de instruções muito práticas;
-- já possui Postgres e Docker na máquina;
-- já conseguiu subir API, Redis, Celery e fluxo de documento;
-- já testou upload, extração e retorno do texto do PDF.
-
-Portanto, as respostas devem:
-
-- evitar jargão desnecessário;
-- ser guiadas passo a passo;
-- focar em implementação;
-- assumir pouco conhecimento prévio;
-- minimizar complexidade.
-
----
-
-## 18. Próximos marcos do projeto
-
-### MVP funcional demonstrável
-
-O MVP será considerado demonstrável quando o sistema conseguir:
-
-1. receber um PDF;
-2. extrair e chunkar texto;
-3. listar perfis;
-4. criar sessão com documento + perfil;
-5. receber segmentos de fala;
-6. gerar perguntas automaticamente;
-7. enviar perguntas por WebSocket.
-
-### Pós-MVP
-
-Depois disso:
-
-- integrar LLM real;
-- melhorar qualidade da pergunta;
-- adicionar analytics;
-- feedback final;
-- suporte a PPTX/DOCX;
-- embeddings com pgvector;
-- ingestão de áudio com STT.
-
----
-
-## 19. Resumo ultra-curto para reaproveitamento
-
-**Podium** = backend FastAPI para treino de oratória com VR + IA.
-
-### Estado atual
-
-- upload PDF ok;
-- Celery + Redis ok;
-- extração de texto ok;
-- chunks ok;
-- busca FTS no Postgres ok.
-
-### Próxima ordem
-
-- profiles;
-- sessions;
-- transcript segments;
-- questions stub;
-- websocket;
-- guardrails;
-- LLM real.
-
-### Sempre priorizar
-
-- MVP incremental;
-- baixo acoplamento;
-- poucas mudanças por etapa;
-- respostas práticas e econômicas em tokens.
+## Data Flow
+
+### 1. Document ingestion
+Client uploads PDF/PPTX/DOCX → `storage_service` saves file → `Document` created (status `QUEUED`)
+→ Celery task `extract_document_text`: extracts text → chunks (1200 chars, 200 overlap)
+→ optionally generates OpenAI embeddings (stored as JSON) → status becomes `CHUNKED`.
+
+### 2. Session creation
+Client picks a processed document + simulation profile → `POST /sessions` creates
+`Session(status=READY)`. Document must be `CHUNKED` or `READY`.
+
+### 3. Transcript segments
+During the VR presentation, frontend sends text segments via `POST /sessions/{id}/segments`.
+First segment flips session to `RUNNING`. Each segment fires Celery task
+`generate_question_for_segment`.
+
+### 4. Question generation
+Task applies rate limiting + cooldown (per-profile config) + deduplication (SequenceMatcher > 0.75).
+`simulation_service` retrieves top-5 chunks via Postgres FTS, loads profile-specific prompt,
+calls `llm_service.generate_question()`. Falls back to template stub if no LLM key.
+
+### 5. Real-time delivery
+Question is saved to DB → published to Redis channel `session:{id}:events`
+→ WebSocket at `/sessions/{id}/live` pushes to VR client.
+
+### 6. Post-session
+`POST /sessions/{id}/feedback` (202) fires Celery task that builds a coaching prompt from
+all segments + questions, calls LLM, stores result in `session.feedback_text`.
+`GET /sessions/{id}/analytics` returns pure-SQL metrics (no LLM).
+
+## Simulation Profiles
+
+Seeded via `python -m app.scripts.seed_profiles`. Each has a prompt file + config JSON.
+
+| Key | Focus | Difficulty |
+|-----|-------|-----------|
+| `academic` | Rigor, methodology, theoretical depth (banca de TCC style) | 4-5 |
+| `corporate` | ROI, value proposition, feasibility, risks | 3-4 |
+| `interview` | Concrete evidence, measurable impact, self-awareness | 3-4 |
+| `auditorium` | Diverse audience, unpredictable questions, improvisation | 3-5 |
+
+## Endpoints
+
+### No auth
+- `GET /health`
+- `POST /auth/register` — `{email, password}` → JWT
+- `POST /auth/login` — OAuth2 form → JWT
+- `POST /documents` — upload PDF/PPTX/DOCX
+- `GET /documents/{id}`, `GET /documents/{id}/text`, `GET /documents/{id}/chunks`, `GET /documents/{id}/search?q=`
+- `GET /profiles`, `GET /profiles/{id}`
+- `WS /sessions/{id}/live`
+
+### Requires Bearer token
+- `GET /auth/me`
+- `POST /sessions` — `{document_id, profile_id}`
+- `GET /sessions/{id}`
+- `POST /sessions/{id}/segments` — `{text, start_ms?, end_ms?}`
+- `GET /sessions/{id}/segments`, `GET /sessions/{id}/questions`
+- `POST /sessions/{id}/audio` — upload audio for STT (**note: auth missing on this endpoint**)
+- `GET /sessions/{id}/analytics`
+- `POST /sessions/{id}/feedback` (202), `GET /sessions/{id}/feedback`
+
+## Models
+
+| Model | Table | Key fields |
+|-------|-------|-----------|
+| `Document` | `documents` | filename, content_type, storage_path, status, extracted_text |
+| `DocumentChunk` | `document_chunks` | document_id (FK), chunk_index, content, embedding (JSON) |
+| `SimulationProfile` | `simulation_profiles` | key (unique), name, description, config (JSON) |
+| `Session` | `sessions` | user_id (FK), document_id (FK), profile_id (FK), status, feedback_text |
+| `TranscriptSegment` | `transcript_segments` | session_id (FK), text, start_ms, end_ms |
+| `Question` | `questions` | session_id (FK), question_text, intent, difficulty, evidence_chunk_ids (JSON) |
+| `User` | `users` | email (unique), hashed_password |
+
+## Celery Tasks (`app/workers/tasks.py`)
+
+| Task | Trigger |
+|------|---------|
+| `extract_document_text(document_id)` | Document upload |
+| `generate_question_for_segment(session_id, segment_id)` | New transcript segment |
+| `generate_session_feedback(session_id)` | `POST /sessions/{id}/feedback` |
+| `process_audio_transcription(session_id, file_path, filename)` | `POST /sessions/{id}/audio` |
+
+## What's Working
+
+- Full document pipeline: upload → extract text (PDF/PPTX/DOCX) → chunk → index
+- Postgres Full-Text Search for chunk retrieval
+- Simulation profiles (CRUD + seed script)
+- Sessions with auth (create, read, ownership check)
+- Transcript segments (create, list, triggers question generation)
+- LLM integration: OpenAI GPT-4o-mini + Gemini fallback + stub fallback
+- Question generation with rate limiting, cooldown, deduplication
+- Redis Pub/Sub + WebSocket for real-time question delivery
+- Session feedback via LLM
+- Session analytics (pure SQL metrics)
+- Auth: register, login, JWT, protected session endpoints
+- STT via Whisper API
+- Embeddings generated and stored (JSON column)
+- Prompt templates per profile (`app/prompts/`)
+- 28 tests passing
+
+## What's Not Working / Still TODO
+
+### Bugs / schema issues
+- **`sessions.user_id` missing from Alembic migrations**: model has it, but no migration adds the column. Fresh DB will break on session creation. Needs a new migration.
+- **Empty no-op migration** (`6bc9dfb22dd5`): auto-generated with only `pass`.
+- **`POST /sessions/{id}/audio` has no auth guard**: unlike all other session routes.
+- **`app/api/deps.py` is empty**: auth dependency lives in `auth.py` instead.
+
+### Not yet implemented
+- **Vector similarity search in question generation**: embeddings are stored but `simulation_service` only uses Postgres FTS, not cosine similarity from `vector_service`.
+- **Auth on document endpoints**: documents are fully public.
+- **Auth on WebSocket**: no token verification on WS connections.
+- **PPTX/DOCX extraction**: code exists in `document_service.py` but is untested and the upload route accepts these content types.
+- **`aiosqlite` not in `pyproject.toml`**: needed by test suite but not declared as a dependency.
+
+### Future roadmap
+1. Fix Alembic migration for `sessions.user_id`
+2. Wire vector similarity into question generation (hybrid FTS + cosine)
+3. Add auth to document routes and WebSocket
+4. Improve question quality and prompt engineering
+5. Add pgvector extension for native vector ops
+6. Support audio ingestion pipeline end-to-end (STT → segments → questions)
+7. Add comprehensive analytics and feedback quality
+
+## Code Conventions
+
+- FastAPI + `APIRouter`, `response_model`, `Depends(get_db)`
+- SQLAlchemy async: `AsyncSession`, `select()`, `await db.execute()`
+- Celery tasks use `asyncio.run()` internally (Windows `--pool=solo`)
+- Pydantic v2 schemas with `model_config = ConfigDict(from_attributes=True)`
+- Enums in `app/core/enums.py`: `DocumentStatus`, `SessionStatus`, `QuestionIntent`, `QuestionDifficulty`
+- Error handling: `HTTPException` with appropriate status codes
+- Keep changes small and incremental — this is a learning project
